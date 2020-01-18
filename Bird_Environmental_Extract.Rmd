@@ -21,6 +21,8 @@ Load in raster and sp package
 ```{r, warning=FALSE, message=FALSE}
 library(raster)
 library(sp)
+#devtools::install_github("r-spatial/sf") #install gdal via brew
+library(sf)
 library(rgdal)
 library(maptools)
 library(pander)
@@ -29,28 +31,116 @@ library(dplyr)
 library(tidyverse)
 library(knitr)
 library(lsr)
+library(data.table)
+library(readxl)
+library(fuzzyjoin)
+library(parallel)
+# devtools::install_github("jimhester/archive") # Need to use: brew install libarchive in bash
+# devtools::install_github("mirzacengic/climatedata")
+library(climatedata)
+options(stringsAsFactors = FALSE)
 ```
 
 ##Read in all species
 
+Because the HBW taxonomy changes year to year we will have to use a field known as the SpcRecID and the SISRecID. SpcRecID was used pre-2014 and thus is used for the birdtree.org phylogeny. SISRecID is used post 2014 and is thus used for this edition of the spatial dataset. 
+
 ```{r}
-#Find a way to filter in before reading the species in
-data <- readOGR('data/') 
+if(!file.exists("data/Intermediate_data/BOTW.rds")){
+all.data <- sf::read_sf("data/BOTW/BOTW.gdb") #read_sf is supposed to be faster than readOGR
+saveRDS(all.data, "data/Intermediate_data/BOTW.rds")
+} else {
+  all.data <- readRDS("data/Intermediate_data/BOTW.rds")
+  }
+nest.data <- read_csv("data/Combined_allspp.csv", ) %>% mutate(SCINAME = str_replace_all(species, "_", " "))
+
+# HBW checklists from 2010 (when Jetz made phylogeny) and most recent for shapefiles
+HBW.checklist.2010 <- read_excel("taxa_details/BirdLife_Checklist_Version_3.xls") %>% select(`Scientific name`, contains("Synonyms"), contains("SpcRecID")) %>% `colnames<-`(c("SCINAME", "Synonyms", "SpcRecID"))
+HBW.checklist.2018 <- read_excel("taxa_details/HBW-BirdLife_Checklist_Version_3.xlsx", skip = 1) %>% select(`Scientific name`, contains("SpcRecID"), contains("SISRecID")) %>% `colnames<-`(c("SCINAME", "SpcRecID", "SISRecID"))
+
+# Read in the metadata for the Jetz phylogeny. We should use these names in the phylogenetic analysis
+Jetz.Species <- read.csv("taxa_details/Jetz_Species.csv") %>% select(WJSpecID, Scientific)
+
+# Read in the data that had non-matching taxanomic names/missing species ID
+missing.species.id <- read.csv("taxa_details/no_SpcRecID_IM.csv") %>% 
+  mutate(SCINAME = str_replace_all(species, "_", " ")) %>% 
+  select(SpcRecID.new = SpcRecID, SCINAME) %>% na.omit()
+jetz.taxonomy.missing <- read.csv("taxa_details/Jetz_taxonomy_missing.csv")
 ```
 
-Get unique names
-```{r}
-species.names <- unique(data@data$SCINAME)
+
+```{r missingdata}
+#### Data match to phylogeny ####
+# Group SpecRecID as a vector column as some species have multiple IDs. 
+HBW.checklist.2010.collapsed <- HBW.checklist.2010 %>%
+  filter(!is.na(SCINAME))
+  # group_by(SCINAME) %>%
+  # summarise(SpcRecID = I(list(SpcRecID)))
+# sum(is.null(HBW.checklist.2010.collapsed$SpcRecID))
+# # Using the nest data add the Species IDs (matching by SCINAME and also synonyms)
+nest.data.withID <- nest.data %>% left_join(HBW.checklist.2010.collapsed)
+# length(which(sapply(nest.data.withID$SpcRecID, is.null)))
+# # 56
+# # Match by synonyms
+nest.data.withID2 <- HBW.checklist.2010 %>% select(-SCINAME, Syn.SpcRecID = SpcRecID) %>%
+  fuzzy_right_join(nest.data.withID, by = c("Synonyms" = "SCINAME"), match_fun = str_detect) %>% 
+  mutate(SpcRecID = coalesce(SpcRecID, Syn.SpcRecID))
+  # mutate(SpcRecID = case_when(!is.na(Syn.SpcRecID) ~ pmap(list(SpcRecID, Syn.SpcRecID), c),
+  #                             is.na(Syn.SpcRecID) ~ pmap(list(SpcRecID), c)))
+# length(which(sapply(nest.data.withID2$SpcRecID, is.null)))
+# # 44
+
+# # Add in the missing species ~ 40 species 
+nest.data.withID3 <- nest.data.withID2 %>% left_join(missing.species.id) %>%
+  mutate(SpcRecID = coalesce(SpcRecID.new, as.integer(SpcRecID)))
+#   mutate(SpcRecID = case_when(!is.na(SpcRecID.new) ~ pmap(list(SpcRecID, SpcRecID.new), c),
+#                               is.na(SpcRecID.new) ~ pmap(list(SpcRecID), c)))
+# length(which(sapply(nest.data.withID3$SpcRecID, is.null)))
+# # 12 (removed)
+
+nest.data.jetz <- nest.data.withID3 %>% 
+  left_join(jetz.taxonomy.missing %>% select(SCINAME, sp_tax_jetz)) %>%
+  mutate(SCINAME = coalesce(sp_tax_jetz, SCINAME)) %>%
+  left_join(Jetz.Species, by = c("SCINAME" = "Scientific")) %>%
+  filter(!is.na(WJSpecID)) # REMOVE 3 SPECIES NOT INCLUDED IN JETZ
+
+#### Data match to shapefiles ####
+species.with.shapes <- all.data %>% as.data.frame() %>% select(SISID) %>% unique()
+
+#### Species to extract data for ####
+nest.2018.ID.data <- nest.data.jetz %>% 
+  inner_join(HBW.checklist.2018 %>% rename(SCINAME2018 = SCINAME), by = "SpcRecID") %>%
+  filter(!is.na(SpcRecID)) %>%
+  group_by(SISRecID) %>%
+  summarise(SpcRecID = list(unique(SpcRecID)),
+            SCINAME2018 = list(unique(SCINAME2018)),
+            Jetz.name = list(unique(SCINAME))) %>%
+  ungroup()
+
+if(!file.exists("data/Intermediate_data/bird.ranges.breeding.Rds")){
+bird.ranges <- all.data %>% 
+  filter(SISID %in% nest.2018.ID.data$SISRecID & SEASONAL %in% c(1,2)) %>% #Resident or breeding ranges
+  st_cast("MULTIPOLYGON") %>% #Remove MULTISURFACE shapes that ruin everything
+  group_by(SISID) %>%
+  summarise(SCINAME = glue::glue_collapse(SCINAME, sep = ", "), 
+            SEASONAL = glue::glue_collapse(SEASONAL, sep = ", "),
+            Shape = st_union(Shape), #combine the multiple polygons for each species
+            Range.Size = st_area(Shape))
+saveRDS(bird.ranges, file = "data/Intermediate_data/bird.ranges.breeding.Rds")
+} else {
+  bird.ranges <- readRDS("data/Intermediate_data/bird.ranges.breeding.Rds")
+}
+
 ```
 
 Run loop
 ```{r, warning = FALSE}
-#Only use the breeding ranges
-for (i in 1:length(unique)) {
-    tmp <- data[data$SCINAME == unique[i], ] 
-  writeOGR(tmp, dsn='data/All_species_R', unique[i], driver="ESRI Shapefile",
-           overwrite_layer=TRUE)
-   }
+# #Only use the breeding ranges
+# for (i in 1:length(nest.2018.ID.data)) {
+#   tmp <- nest.2018.ID.data[nest.2018.ID.data$SCINAME == unique[i], ] 
+#   writeOGR(tmp, dsn='data/All_species_R', unique[i], driver="ESRI Shapefile",
+#            overwrite_layer=TRUE)
+#    }
 ```
 
 Great, now we have all our individual shapefiles named as ``Abeillia abeillei.shp`` 
@@ -59,100 +149,98 @@ Great, now we have all our individual shapefiles named as ``Abeillia abeillei.sh
 
 Now extract worldclim data: we use grids of 2.5 min
 ```{r}
-### Get Data from Chelsea instead
+### Get Data Chelsea for the current period
+chelsa_bioclim_current <- get_chelsa(type = "bioclim",
+                                     output_dir = "data/climate",
+                                     period = "current") #Downloads first time but then reads in tifs
 
-# #Easy to get 2.5 min
-# bioclim_data <- getData("worldclim",var="bio",res=2.5)
+#It's now saved in the data folder
 
-#But let's get 30 second
-bioclim.layer <- dir('data/BIOCLIMdata', "*.tif")
-bioclim_data <- stack(paste(getwd(),"/data/BIOCLIMdata/", bioclim.layer, sep=""))
-```
+### Get Future climate predictions: Run this later
 
-##Read in species distribution polygons
+# From these models we want to narrow it down to a subset that has low interdependency; this means we get good estimates of uncertainty without having to extract data from all the models. This ranking is taken from: Sanderson, B.M., Knutti, R. & Caldwell, P. (2015) A Representative Democracy to Reduce Interdependency in a Multimodel Ensemble. Journal of Climate, 28, 5171–5194)
+top5.low.interdependent.models <- c("CESM-1-BCG",
+                                  "MPI-ESM-MR",
+                                  "MIROC5",
+                                  "CMCC-CM",
+                                  "CESM1-CAM5")
 
-Now we want to obtain a sample from our spatial polygon. First we should export our shapefile dataset (from QGIS). Then we read in the shapefile using readOGR (using lapply to make list of dataframes)
 
-```{r, results='hide'}
-shps <- dir('data/All_species_R', "*.shp")
-shps <- sub('\\.shp$', "", shps)
+# Get models with all 4 RCP scenarios
+models_all_rcp <- check_models() %>% 
+group_by(model) %>%
+  mutate(n = n()) %>%
+  ungroup() %>%
+  filter(n == 4) %>%
+  distinct(model) %>%
+  pull()
 
-# #Read in Dale data and restrict
-# dale.dat <- read.csv('data/dale_plumage_scores.csv')
-# passerine.master.tax <- read.csv('data/Pass_Master_Tax.csv')
-# 
-# #Is our Dale dataset equivelant to the Jetz master list?
-# dale.jetz.anti <- anti_join(passerine.master.tax, dale.dat, by = "binomial")
-# #We lose species because they are not included in the Dale dataset (at least not at the time the dataset was created)
-# 
-# #Restrict shps
-# shps.df <- as.data.frame(shps)
-# colnames(shps.df) <- "binomial"
-# shps.df$iucn <- "yes"
-# shps.df$iucn.sciname <- shps.df$binomial
-# 
-# #Let's see what Passerine bird species are missing from our 
-# dale.iucn.match <- left_join(dale.dat[1], shps.df, by = "binomial")
-# 
-# dale.iucn.match <- dale.iucn.match %>% replace_na(list(iucn = "no"))
-
-# #From this we can start to match missing species in the IUCN
-# #Do this manually in excel
-# write.csv(dale.iucn.match, "data/dale.iucn.match.csv", row.names = F)
-
-#Read back in the list of taxa where Jetz taxanomic names are matched to IUCN names
-taxa.match.df <- read.csv('data/taxa_match.csv')
-
-#Let's double check that our names match with the shapefile names.
-anti.taxa.match <- anti_join(taxa.match.df, shps.df, by = 'binomial')
-#Ok good, should match. However there might be a few duplicates due to species lumping and classification differences. Better to extract data for these rather than omitting as species ranges should be similar/same
-anyDuplicated(taxa.match.df$binomial)
-
-shps.df2 <- data_frame(taxa.match.df$binomial)
-shps.jetz <- data_frame(taxa.match.df$jetz.name)
-colnames(shps.jetz) <- "binomial"
-colnames(shps.df2) <- "binomial"
-# #Ok so we lose 1230 species going from Dale data to IUCN (were in Dale but not IUCN)
-# #not in dale
-# no.dale <- anti_join(shps.df, dale.dat, by = "binomial")
-# #not in iucn
-# no.iucn <- anti_join(dale.dat, shps.df, by = "binomial")
-
-shps <- as.vector(shps.df2$binomial)
-```
-
-We can now use the list of taxa to read in the polygons for each species
-```{r}
-# shps <- paste(shps, ".shp", sep="")
-bird.ranges <- lapply(shps, function(x) {
-  assign(x, readOGR(dsn = 'data/All_species_R', layer = x))})
+if(!dir.exists("data/climate/current")){
+chelsa_bioclim_future <- get_chelsa(output_dir = my_output_directory, 
+                                      period = "future", 
+                                      future_years = "2041-2060", 
+                                      scenario_string = "rcp85", #Get multiple and interpolate
+                                      model_string = models_all_rcp)
+}
 ```
 
 #Now we want to randomly sample each polygon
-```{r}
+```{r, warning=FALSE, message=FALSE, results='hide'}
+if(!file.exists("data/intermediate_data/bird.points.rds")){
 #Increse the iterations (defaukt is 4) so we can obtain complete samples of each range
-bird.points <- lapply(bird.ranges, 
-                       function(x) {spsample(x, n=1000, type="random", iter = 30)})
+bird.range.list <- setNames(split(bird.ranges, 
+                                  seq(nrow(bird.ranges))), 
+                            bird.ranges$SISID)
+bird.points <- list()
+bird.points <- mclapply(bird.range.list, function(x){
+  sp::spsample(sf::as_Spatial(x), n = 1000, type = "random", iter = 30, quiet = T)
+}, mc.cores = 4)
+saveRDS(bird.points, "data/intermediate_data/bird.points.rds")
+} else {
+bird.points <- readRDS("data/intermediate_data/bird.points.rds")
+}
 ```
 
 Now we extract the bioclim data from each of the points
 ```{r}
-bird.values <- lapply(bird.points, function(x) {raster::extract(bioclim_data, x)})
-bird.values <- as.list(data.frame((bird.values)))
+bird.values <- mclapply(bird.points, function(x) {
+  raster::extract(chelsa_bioclim_current, x)
+  }, mc.cores = 4) #raster cant deal with sf 
+#bird.values <- as.list(data.frame((bird.values)))
 ```
 
-From these 1000 points we want a min, mean, max. We can do this when building the df
+From these 1000 points we want a mean and sd. We can do this when building the df
 
 ```{r}
-bird.frame <- lapply(bird.values, function(x) {as.data.frame(x)})
-bird.summary <- lapply(bird.frame, function(x) {
-(as.data.frame(apply(x,2,mean, na.rm =T )))})
+
+bird.frame <- mclapply(bird.values, function(x) {as.data.frame(x)}, mc.cores = 4)
+bird.summary <- mclapply(bird.frame, function(x) {
+  as.data.table(x)[, c(mean = lapply(.SD, mean, na.rm=TRUE), 
+                       sd = lapply(.SD, sd, na.rm=TRUE)),]
+}, mc.cores = 4)
+bird.summary.combined <- cbind(data.table(SISID = names(bird.points)),
+                                    do.call(rbind, bird.summary))
+saveRDS(bird.summary.combined, "data/Intermediate_data/bird.summary.combined.rds")
+
+#Combine with original data 
+bird.data.recombined <- bird.summary.combined %>% 
+  as.data.frame() %>%
+  mutate(SISID = as.integer(SISID)) %>%
+  left_join(bird.ranges %>% 
+              st_drop_geometry() %>%
+              select(SISID, SCINAME, Range.Size) %>%
+              as.data.frame())
+
+saveRDS(bird.data.recombined, "data/Intermediate_data/bird.data.recombined.rds")
 ```
+
+
+
 
 transpose
 ```{r}
-bird.means <- t(as.data.frame(bird.summary))
-bird.means <- (split(bird.means, 1:19))
+bird.means <- t(bird.summary)
+bird.means <- split(bird.means, 1:19)
 ```
 
 Now add column of species name
@@ -187,6 +275,10 @@ Write csv
 ```{r}
 write.csv(bird.range.size, 'data/bird.range.size.csv')
 ```
+
+
+
+
 
 
 ##Now for Paleoclimate
