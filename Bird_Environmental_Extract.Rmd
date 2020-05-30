@@ -3,7 +3,6 @@ title: 'Data Preperation for Bird Species in Comparative Analysis'
 author: "Justin G. Cally"
 subtitle: Supplementary Material
 output:
-  pdf_document: default
   html_document:
     toc: true # table of content true
     toc_float: false # make 
@@ -11,13 +10,13 @@ output:
     number_sections: false  ## if you want number sections at each table header
     theme: yeti # lovely fonts and colours
     code_folding: hide # awesome buttons to show/hide the code
+  pdf_document: default
 ---
 
-#Bird Environmental Data
+# Bird Environmental Data
 
-Here we will try and extract environmental data for a polygon that estimates a species distribution. 
-
-Load in raster and sp package
+## Setup  
+Load in packages used in the analysis
 ```{r, warning=FALSE, message=FALSE}
 library(raster)
 library(sp)
@@ -41,11 +40,11 @@ library(climatedata)
 options(stringsAsFactors = FALSE)
 ```
 
-##Read in all species
+## Read in all species
 
 Because the HBW taxonomy changes year to year we will have to use a field known as the SpcRecID and the SISRecID. SpcRecID was used pre-2014 and thus is used for the birdtree.org phylogeny. SISRecID is used post 2014 and is thus used for this edition of the spatial dataset. 
 
-```{r}
+```{r data_read}
 if(!file.exists("data/Intermediate_data/BOTW.rds")){
 all.data <- sf::read_sf("data/BOTW/BOTW.gdb") #read_sf is supposed to be faster than readOGR
 saveRDS(all.data, "data/Intermediate_data/BOTW.rds")
@@ -68,6 +67,9 @@ missing.species.id <- read.csv("taxa_details/no_SpcRecID_IM.csv") %>%
 jetz.taxonomy.missing <- read.csv("taxa_details/Jetz_taxonomy_missing.csv")
 ```
 
+## Deal with missing data
+
+Using some fuzzy string matching format the spatial data in a more complete fashion and using the SISID. Range size is also calculated here.
 
 ```{r missingdata}
 #### Data match to phylogeny ####
@@ -133,59 +135,50 @@ saveRDS(bird.ranges, file = "data/Intermediate_data/bird.ranges.breeding.Rds")
 
 ```
 
-Run loop
-```{r, warning = FALSE}
-# #Only use the breeding ranges
-# for (i in 1:length(nest.2018.ID.data)) {
-#   tmp <- nest.2018.ID.data[nest.2018.ID.data$SCINAME == unique[i], ] 
-#   writeOGR(tmp, dsn='data/All_species_R', unique[i], driver="ESRI Shapefile",
-#            overwrite_layer=TRUE)
-#    }
-```
+## Download Worldclim data
 
-Great, now we have all our individual shapefiles named as ``Abeillia abeillei.shp`` 
-
-##Worldclim data
-
-Now extract worldclim data: we use grids of 2.5 min
-```{r}
+Using the climatedata package extract worldclim data: we use grids of 2.5 min.
+```{r worldclim_data}
 ### Get Data Chelsea for the current period
 chelsa_bioclim_current <- get_chelsa(type = "bioclim",
                                      output_dir = "data/climate",
                                      period = "current") #Downloads first time but then reads in tifs
 
-#It's now saved in the data folder
+# It's now saved in the data folder
 
+# FUTURE CLIMATES #
 ### Get Future climate predictions: Run this later
+# Don't think this is required unless you want to predict future
 
 # From these models we want to narrow it down to a subset that has low interdependency; this means we get good estimates of uncertainty without having to extract data from all the models. This ranking is taken from: Sanderson, B.M., Knutti, R. & Caldwell, P. (2015) A Representative Democracy to Reduce Interdependency in a Multimodel Ensemble. Journal of Climate, 28, 5171–5194)
-top5.low.interdependent.models <- c("CESM-1-BCG",
-                                  "MPI-ESM-MR",
-                                  "MIROC5",
-                                  "CMCC-CM",
-                                  "CESM1-CAM5")
+# top5.low.interdependent.models <- c("CESM-1-BCG",
+#                                   "MPI-ESM-MR",
+#                                   "MIROC5",
+#                                   "CMCC-CM",
+#                                   "CESM1-CAM5")
 
 
 # Get models with all 4 RCP scenarios
-models_all_rcp <- check_models() %>% 
-group_by(model) %>%
-  mutate(n = n()) %>%
-  ungroup() %>%
-  filter(n == 4) %>%
-  distinct(model) %>%
-  pull()
-
-if(!dir.exists("data/climate/current")){
-chelsa_bioclim_future <- get_chelsa(output_dir = my_output_directory, 
-                                      period = "future", 
-                                      future_years = "2041-2060", 
-                                      scenario_string = "rcp85", #Get multiple and interpolate
-                                      model_string = models_all_rcp)
-}
+# models_all_rcp <- check_models() %>% 
+# group_by(model) %>%
+#   mutate(n = n()) %>%
+#   ungroup() %>%
+#   filter(n == 4) %>%
+#   distinct(model) %>%
+#   pull()
+# if(!dir.exists("data/climate/current")){
+# chelsa_bioclim_future <- get_chelsa(output_dir = my_output_directory, 
+#                                       period = "future", 
+#                                       future_years = "2041-2060", 
+#                                       scenario_string = "rcp85", #Get multiple and interpolate
+#                                       model_string = models_all_rcp)
+# }
 ```
 
-#Now we want to randomly sample each polygon
-```{r, warning=FALSE, message=FALSE, results='hide'}
+# Sample ranges
+
+For each range, sample it 1000 times at random. 
+```{r sample_ranges, warning=FALSE, message=FALSE, results='hide'}
 if(!file.exists("data/intermediate_data/bird.points.rds")){
 #Increse the iterations (defaukt is 4) so we can obtain complete samples of each range
 bird.range.list <- setNames(split(bird.ranges, 
@@ -201,18 +194,24 @@ bird.points <- readRDS("data/intermediate_data/bird.points.rds")
 }
 ```
 
+# Extract cllimate data from ranges
 Now we extract the bioclim data from each of the points
-```{r}
+```{r extract}
+if(!file.exists("data/intermediate_data/bird.values.rds")){
 bird.values <- mclapply(bird.points, function(x) {
   raster::extract(chelsa_bioclim_current, x)
   }, mc.cores = 4) #raster cant deal with sf 
-#bird.values <- as.list(data.frame((bird.values)))
+
+saveRDS(bird.values, "data/intermediate_data/bird.values.rds")
+} else {
+bird.values <- readRDS("data/intermediate_data/bird.values.rds")
+}
 ```
 
-From these 1000 points we want a mean and sd. We can do this when building the df
+# Get summary output and format with the original data
 
-```{r}
-
+```{r format_output}
+if(!file.exists("data/intermediate_data/bird.data.recombined.rds")){
 bird.frame <- mclapply(bird.values, function(x) {as.data.frame(x)}, mc.cores = 4)
 bird.summary <- mclapply(bird.frame, function(x) {
   as.data.table(x)[, c(mean = lapply(.SD, mean, na.rm=TRUE), 
@@ -220,7 +219,6 @@ bird.summary <- mclapply(bird.frame, function(x) {
 }, mc.cores = 4)
 bird.summary.combined <- cbind(data.table(SISID = names(bird.points)),
                                     do.call(rbind, bird.summary))
-saveRDS(bird.summary.combined, "data/Intermediate_data/bird.summary.combined.rds")
 
 #Combine with original data 
 bird.data.recombined <- bird.summary.combined %>% 
@@ -230,581 +228,11 @@ bird.data.recombined <- bird.summary.combined %>%
               st_drop_geometry() %>%
               select(SISID, SCINAME, Range.Size) %>%
               as.data.frame())
-
 saveRDS(bird.data.recombined, "data/Intermediate_data/bird.data.recombined.rds")
-```
-
-
-
-
-transpose
-```{r}
-bird.means <- t(bird.summary)
-bird.means <- split(bird.means, 1:19)
-```
-
-Now add column of species name
-```{r}
-bird.means <- cbind.data.frame(shps.jetz, bird.means)
-```
-
-```{r}
-rownames(bird.means) <- NULL
-colnames(bird.means) <- c("binomial","bioclim1", "bioclim2", "bioclim3", "bioclim4", "bioclim5", "bioclim6", "bioclim7", "bioclim8", "bioclim9", "bioclim10", "bioclim11", "bioclim12", "bioclim13", "bioclim14", "bioclim15", "bioclim16", "bioclim17", "bioclim18", "bioclim19")
-```
-
-Write csv
-```{r}
-write.csv(bird.means, 'data/bird.means.csv')
-```
-
-##Range size
-
-Cool! Ok, let's try and get range sizes from the list.
-```{r}
-bird.range.size <- sapply(bird.ranges,
-                       function(x) {(area(x))})
-bird.range.size <- sapply(bird.range.size, function(x) {sum(x)})
-bird.range.size <- as.data.frame(bird.range.size)
-bird.range.size <- cbind.data.frame(shps.jetz, bird.range.size)
-rownames(bird.range.size) <- NULL
-colnames(bird.range.size) <- c("binomial", "range.size.m2")
-```
-
-Write csv
-```{r}
-write.csv(bird.range.size, 'data/bird.range.size.csv')
-```
-
-
-
-
-
-
-##Now for Paleoclimate
-
-Using the CCSM4 models we download 2.5 minute raster grids of predicted climate for the last glacial maximum (22,000 years ago). We then need to import this GeoTiff into the environment and into a rasterstack
-
-```{r}
-bi.layer <- dir('data/LGMdata', "*.tif")
-LGM.stack <- stack(paste(getwd(),"/data/LGMdata/", bi.layer, sep=""))
-```
-
-Since we already have 1000 samples of each bird range we can proceed to sampling the paleoclimate layers via the following: 
-
-Now we extract the bioclim data from each of the points
-```{r}
-LGM.bird.values <- lapply(bird.points, function(x) {raster::extract(LGM.stack, x)})
-
-
-LGM.bird.values <- as.list(data.frame((LGM.bird.values)))
-```
-
-From these 1000 points we want a min, mean, max. We can do this when building the df
-
-```{r}
-
-LGM.bird.frame <- lapply(LGM.bird.values, function(x) {as.data.frame(x)})
-LGM.bird.summary <- llply(LGM.bird.frame, function(x) {
-  (as.data.frame(apply(x,2,mean, na.rm =T)))})
-```
-
-transpose
-```{r}
-LGM.bird.means <- t(as.data.frame(LGM.bird.summary))
-LGM.bird.means <- (split(LGM.bird.means, 1:19))
-
-#Divide temperatures by 10
-LGM.bird.means[c(1,2,3,12,14:19)] <- llply(LGM.bird.means[c(1,2,3,12,14:19)], function(x) {
-  ifelse(is.na(x),x,x/10)})
-```
-
-Now add column of species name
-```{r}
-LGM.bird.means <- cbind.data.frame(shps.jetz, LGM.bird.means)
-```
-
-Get rid of rownames
-```{r}
-rownames(LGM.bird.means) <- NULL
-colnames(LGM.bird.means) <- c("binomial","cclgmbi1", "cclgmbi10", "cclgmbi11", "cclgmbi12", "cclgmbi13", "cclgmbi14", "cclgmbi15", "cclgmbi16", "cclgmbi17", "cclgmbi18", "cclgmbi19", "cclgmbi2", "cclgmbi3", "cclgmbi4", "cclgmbi5", "cclgmbi6", "cclgmbi7", "cclgmbi8", "cclgmbi9") #automatically arranges in strange order
-```
-
-Write csv
-```{r}
-write.csv(LGM.bird.means, 'data/LGM.bird.means.csv')
-```
-
-Alongside LGM we can also get the last inter-glacial (~120,000 - 140,000 BP)
-
-```{r}
-LIG.layer <- dir('data/LIGdata', "*.bil")
-LIG.stack <- stack(paste(getwd(),"/data/LIGdata/", LIG.layer, sep=""))
-```
-
-Since we already have 1000 samples of each bird range we can proceed to sampling the paleoclimate layers via the following: 
-
-Now we extract the bioclim data from each of the points
-```{r}
-LIG.bird.values <- lapply(bird.points, function(x) {raster::extract(LIG.stack, x)})
-
-
-LIG.bird.values <- as.list(data.frame((LIG.bird.values)))
-```
-
-From these 1000 points we want a min, mean, max. We can do this when building the df
-
-```{r}
-LIG.bird.frame <- lapply(LIG.bird.values, function(x) {as.data.frame(x)})
-LIG.bird.summary <- llply(LIG.bird.frame, function(x) {
-  (as.data.frame(apply(x,2,mean, na.rm =T)))})
-```
-
-transpose
-```{r}
-LIG.bird.means <- t(as.data.frame(LIG.bird.summary))
-LIG.bird.means <- (split(LIG.bird.means, 1:19))
-
-#Divide temperatures by 10
-LIG.bird.means[c(1,2,3,12,14:19)] <- llply(LIG.bird.means[c(1,2,3,12,14:19)], function(x) {
-  ifelse(is.na(x),x,x/10)})
-
-```
-
-Now add column of species name
-```{r}
-LIG.bird.means <- cbind.data.frame(shps.jetz, LIG.bird.means)
-```
-
-```{r}
-rownames(LIG.bird.means) <- NULL
-colnames(LIG.bird.means) <- c("binomial","LIG.bi1", "LIG.bi10", "LIG.bi11", "LIG.bi12", "LIG.bi13", "LIG.bi14", "LIG.bi15", "LIG.bi16", "LIG.bi17", "LIG.bi18", "LIG.bi19", "LIG.bi2", "LIG.bi3", "LIG.bi4", "LIG.bi5", "LIG.bi6", "LIG.bi7", "LIG.bi8", "LIG.bi9")
-```
-
-Write csv
-```{r}
-write.csv(LIG.bird.means, 'data/LIG.bird.means.csv')
-```
-
-##NPP
-
-We obtain 30 arc-sec estimates of annual NPP through the Moderate Resolution Imaging Spectroradiometer (MODIS picture). Specifically the Numerical Terradynamic Simulation Group (NTSG) has developed a database with algorithms that take into account corrections etc. to produce a GeoTIFF of mean NPP from 2000 to 2015. Using Each Species we can extract the NPP... how do we do this?
-
-http://files.ntsg.umt.edu/
-
-
-```{r}
-NPP <- raster('data/NPP/NPP00_15.tif')
-```
-
-Now we extract the NPP data from each of the points
-```{r}
-NPP.bird.values <- lapply(bird.points, function(x) {extract(NPP, x)})
-```
-
-From these 1000 points we want a min, mean, max. We can do this when building the df
-
-```{r}
-NPP.bird.frame <- lapply(NPP.bird.values, function(x) {as.data.frame(x)})
-NPP.bird.summary <- lapply(NPP.bird.frame, function(x) {
-  (as.data.frame(apply(x,2,mean, na.rm =T)))})
-```
-
-transpose
-```{r}
-NPP.bird.means <- t(as.data.frame(NPP.bird.summary))
-```
-
-Now add column of species name
-```{r}
-NPP.bird.means <- cbind.data.frame(shps.jetz, NPP.bird.means)
-```
-
-Get rid of rownames
-```{r}
-rownames(NPP.bird.means) <- NULL
-colnames(NPP.bird.means) <- c("binomial", "NPP")
-```
-
-Write csv
-```{r}
-write.csv(NPP.bird.means, 'data/NPP.bird.means.csv')
-```
-
-
-##Calculate the variance
-
-We want to calculate the variance in our sampling. This can be done from taking ``var()`` for the dataframes in both present and past climate.
-
-###For present climate
-```{r}
-bird.se.summary <- lapply(bird.frame, function(x) {
-  (as.data.frame(apply(x,2,function(x) sqrt(var(x,na.rm = TRUE)/length(na.omit(x))))))})
-
-#transpose
-bird.se <- t(as.data.frame(bird.se.summary))
-
-#split
-bird.se <- as.data.frame(split(bird.se, 1:19))
-
-#Now add column of species name
-bird.se <- cbind.data.frame(shps.jetz, bird.se)
-
-#remove rownames
-rownames(bird.se) <- NULL
-colnames(bird.se) <- c("binomial","se.bioclim1", "se.bioclim2", "se.bioclim3", "se.bioclim4", "se.bioclim5", "se.bioclim6", "se.bioclim7", "se.bioclim8", "se.bioclim9", "se.bioclim10", "se.bioclim11", "se.bioclim12", "se.bioclim13", "se.bioclim14", "se.bioclim15", "se.bioclim16", "se.bioclim17", "se.bioclim18", "se.bioclim19")
-
-#Write csv
-write.csv(bird.se, 'data/bird.se.csv')
-```
-
-
-
-Standard Deviation
-```{r}
-bird.sd.summary <- lapply(bird.frame, function(x) {
-  (as.data.frame(apply(x,2,function(x) sd(x,na.rm = TRUE))))})
-
-#transpose
-bird.sd <- t(as.data.frame(bird.sd.summary))
-
-#split
-bird.sd <- as.data.frame(split(bird.sd, 1:19))
-
-#Now add column of species name
-bird.sd <- cbind.data.frame(shps.jetz, bird.sd)
-
-#remove rownames
-rownames(bird.sd) <- NULL
-colnames(bird.sd) <- c("binomial","sd.bioclim1", "sd.bioclim2", "sd.bioclim3", "sd.bioclim4", "sd.bioclim5", "sd.bioclim6", "sd.bioclim7", "sd.bioclim8", "sd.bioclim9", "sd.bioclim10", "sd.bioclim11", "sd.bioclim12", "sd.bioclim13", "sd.bioclim14", "sd.bioclim15", "sd.bioclim16", "sd.bioclim17", "sd.bioclim18", "sd.bioclim19")
-
-#Write csv
-write.csv(bird.sd, 'data/bird.sd.csv')
-```
-
-
-```{r}
-library(ggplot2)
-sd.or.se <- left_join(bird.se, bird.sd)
-cor(sd.or.se$se.bioclim1, sd.or.se$sd.bioclim1)
-
-sd.or.se %>% ggplot(aes(x = se.bioclim3, y = sd.bioclim3))+ geom_point()
-
-cor(x = sd.or.se$se.bioclim1, y = sd.or.se$sd.bioclim1)
-```
-
-
-###For LGM
-
-Run the same code for the LGM dataset
-```{r}
-LGM.bird.sd.summary <- lapply(LGM.bird.frame, function(x) {
-  (as.data.frame(apply(x,2,function(x) sd(x,na.rm = TRUE))))})
-
-#transpose
-LGM.bird.sd <- t(as.data.frame(LGM.bird.sd.summary))
-
-#split
-LGM.bird.sd <- as.data.frame(split(LGM.bird.sd, 1:19))
-
-#Divide temperatures by 10 
-LGM.bird.sd[c(1,2,3,12,14:19)] <- LGM.bird.sd[c(1,2,3,12,14:19)]/10
-
-#Now add column of species name
-LGM.bird.sd <- cbind.data.frame(shps.jetz, LGM.bird.sd)
-
-#remove rownames
-rownames(LGM.bird.sd) <- NULL
-colnames(LGM.bird.sd) <- c("binomial","sd.cclgmbi1", "sd.cclgmbi10", "sd.cclgmbi11", "sd.cclgmbi12", "sd.cclgmbi13", "sd.cclgmbi14", "sd.cclgmbi15", "sd.cclgmbi16", "sd.cclgmbi17", "sd.cclgmbi18", "sd.cclgmbi19", "sd.cclgmbi2", "sd.cclgmbi3", "sd.cclgmbi4", "sd.cclgmbi5", "sd.cclgmbi6", "sd.cclgmbi7", "sd.cclgmbi8", "sd.cclgmbi9") #automatically arranges in strange order
-
-#Write csv
-write.csv(LGM.bird.sd, 'data/LGM.bird.sd.csv')
-```
-
-###For NPP
-
-```{r}
-NPP.bird.sd.summary <- lapply(NPP.bird.frame, function(x) {
-  (as.data.frame(apply(x,2,function(x) sd(x,na.rm = TRUE))))})
-
-#transpose
-NPP.bird.sd <- t(as.data.frame(NPP.bird.sd.summary))
-
-#Now add column of species name
-NPP.bird.sd <- cbind.data.frame(shps.jetz, NPP.bird.sd)
-
-#remove rownames
-rownames(NPP.bird.sd) <- NULL
-colnames(NPP.bird.sd) <- c("binomial", "NPP.sd")
-
-#Write csv
-write.csv(NPP.bird.sd, 'data/NPP.bird.sd.csv')
-```
-
-###For LIG
-
-
-```{r}
-LIG.bird.sd.summary <- lapply(LIG.bird.frame, function(x) {
-  (as.data.frame(apply(x,2,function(x) sqrt(var(x,na.rm = TRUE)/length(na.omit(x))))))})
-
-#transpose
-LIG.bird.sd <- t(as.data.frame(LIG.bird.sd.summary))
-
-#split
-LIG.bird.sd <- as.data.frame(split(LIG.bird.sd, 1:19))
-
-#Divide temperatures by 10 
-LIG.bird.sd[c(1,2,3,12,14:19)] <- LIG.bird.sd[c(1,2,3,12,14:19)]/10
-
-#Now add column of species name
-LIG.bird.sd <- cbind.data.frame(shps.jetz, LIG.bird.sd)
-
-#remove rownames
-rownames(LIG.bird.sd) <- NULL
-colnames(LIG.bird.sd) <- c("binomial","sd.LIG.bi1", "sd.LIG.bi10", "sd.LIG.bi11", "sd.LIG.bi12", "sd.LIG.bi13", "sd.LIG.bi14", "sd.LIG.bi15", "sd.LIG.bi16", "sd.LIG.bi17", "sd.LIG.bi18", "sd.LIG.bi19", "sd.LIG.bi2", "sd.LIG.bi3", "sd.LIG.bi4", "sd.LIG.bi5", "sd.LIG.bi6", "sd.LIG.bi7", "sd.LIG.bi8", "sd.LIG.bi9")
-
-#Write csv
-write.csv(LIG.bird.sd, 'data/LIG.bird.sd.csv')
-```
-
-
-###Combining the data: 
-In excel we joined the data together and double checked the values
-
-##Assess correlations
-
-We may want to discard predictors as although they are loaded into a PCA, having highly correlated predictors may overestimate loadings and/or variance. Additionally they will increase computational requirements. We will be using the following function to assess correlations: 
-
-```{r}
-#use correlation assessment function
-panel.cor <- function(x, y, digits=2, prefix="", cex.cor, ...)
-{
-usr <- par("usr"); on.exit(par(usr))
-par(usr = c(0, 1, 0, 1))
-r <- abs(cor(x, y, use="pairwise.complete.obs"))
-txt <- format(c(r, 0.123456789), digits=digits)[1]
-txt <- paste0(prefix, txt)
-if(missing(cex.cor)) cex.cor <- 0.8/strwidth(txt)
-text(0.5, 0.5, txt, cex = cex.cor * r)
+} else {
+bird.data.recombined <- readRDS("data/intermediate_data/bird.data.recombined.rds")
 }
 ```
-
-**The bioclimate variables assessed here are:**
-
-BIO1 = Annual Mean Temperature
-
-BIO2 = Mean Diurnal Range (Mean of monthly (max temp - min temp))
-
-BIO3 = Isothermality (BIO2/BIO7) (* 100)
-
-BIO4 = Temperature Seasonality (standard deviation *100)
-
-BIO5 = Max Temperature of Warmest Month
-
-BIO6 = Min Temperature of Coldest Month
-
-BIO7 = Temperature Annual Range (BIO5-BIO6)
-
-BIO8 = Mean Temperature of Wettest Quarter
-
-BIO9 = Mean Temperature of Driest Quarter
-
-BIO10 = Mean Temperature of Warmest Quarter
-
-BIO11 = Mean Temperature of Coldest Quarter
-
-BIO12 = Annual Precipitation
-
-BIO13 = Precipitation of Wettest Month
-
-BIO14 = Precipitation of Driest Month
-
-BIO15 = Precipitation Seasonality (Coefficient of Variation)
-
-BIO16 = Precipitation of Wettest Quarter
-
-BIO17 = Precipitation of Driest Quarter
-
-BIO18 = Precipitation of Warmest Quarter
-
-BIO19 = Precipitation of Coldest Quarter
-
-
-###Current day bioclim variables
-
-
-```{r, fig.width=15, fig.height=15}
-#Draw plot
-pairs(bird.means[,2:20], lower.panel=panel.smooth, upper.panel=panel.cor)
-```
-
-###For LGM data
-
-```{r, fig.width=15, fig.height=15}
-#Draw plot
-pairs(LGM.bird.means[,2:20], lower.panel=panel.smooth, upper.panel=panel.cor)
-```
-
-
-###Human inteference data
-
-Night lights
-
-Distance to major cities
-
-Population density
-
-
-We can obtain population density gridded estimates from the following: 
-
-Center for International Earth Science Information Network - CIESIN - Columbia University. 2017. Gridded Population of the World, Version 4 (GPWv4): Population Density Adjusted to Match 2015 Revision UN WPP Country Totals, Revision 10. Palisades, NY: NASA Socioeconomic Data and Applications Center (SEDAC). https://doi.org/10.7927/H49884ZR. Accessed DAY MONTH YEAR
-
-The following is 30 arc seconds of adjusted density from 2010
-
-```{r}
-pop.density <- raster("data/human_impact/pop_density_2010_30arc.tif")
-```
-
-Now we extract the NPP data from each of the points
-```{r}
-pop.density.values <- lapply(bird.points, function(x) {raster::extract(pop.density, x)})
-```
-
-From these 1000 points we want a min, mean, max. We can do this when building the df
-
-```{r}
-pop.density.frame <- lapply(pop.density.values, function(x) {as.data.frame(x)})
-pop.density.summary <- lapply(pop.density.frame, function(x) {
-  (as.data.frame(apply(x,2,mean, na.rm =T)))})
-```
-
-transpose
-```{r}
-pop.density.means <- t(as.data.frame(pop.density.summary))
-```
-
-Now add column of species name
-```{r}
-pop.density.means <- cbind.data.frame(shps.jetz, pop.density.means)
-```
-
-Get rid of rownames
-```{r}
-rownames(pop.density.means) <- NULL
-colnames(pop.density.means) <- c("binomial", "Pop_Density")
-```
-
-Write csv
-```{r}
-write.csv(pop.density.means, 'data/Pop.density.means.csv')
-```
-
-
-```{r}
-pop.density.sd.summary <- lapply(pop.density.frame, function(x) {
-  (as.data.frame(apply(x,2,function(x) sqrt(var(x,na.rm = TRUE)/length(na.omit(x))))))})
-
-#transposd
-pop.density.sd <- t(as.data.frame(pop.density.sd.summary))
-
-#Now add column of species name
-pop.density.sd <- cbind.data.frame(shps.jetz, pop.density.sd)
-
-#remove rownames
-rownames(pop.density.sd) <- NULL
-colnames(pop.density.sd) <- c("binomial", "pop.density.sd")
-
-#Write csv
-write.csv(pop.density.sd, 'data/pop.density.sd.csv')
-
-```
-
-##Join data together
-
-
-```{r}
-#Masterlist from Jetz/birdtree master
-prelim.dataframe <- read.csv('data/Pass_Master_Tax.csv')
-
-#Bioclim.means
-#bioclim.means <- read.csv('data/bird.means.csv')
-prelim.dataframe <- left_join(prelim.dataframe, bird.means, by = 'binomial')
-
-#Bioclim.sd
-#bioclim.sd <- read.csv('data/bird.sd.csv')
-prelim.dataframe <- left_join(prelim.dataframe, bird.sd, by = 'binomial')
-
-#Range Size
-prelim.dataframe <- left_join(prelim.dataframe, bird.range.size, by = 'binomial')
-
-#LGM means
-#LGM.means <- read.csv('data/LGM.bird.means.csv')
-prelim.dataframe <- left_join(prelim.dataframe, LGM.bird.means, by = 'binomial')
-
-#LGM sd
-#LGM.sd <- read.csv('data/LGM.bird.sd.csv')
-prelim.dataframe <- left_join(prelim.dataframe, LGM.bird.sd, by = 'binomial')
-
-#LIG means
-#LIG.means <- read.csv('data/LIG.bird.means.csv')
-prelim.dataframe <- left_join(prelim.dataframe, LIG.bird.means, by = 'binomial')
-
-#LIG sd
-#LIG.sd <- read.csv('data/LIG.bird.sd.csv')
-prelim.dataframe <- left_join(prelim.dataframe, LIG.bird.sd, by = 'binomial')
-
-#NPP means
-#NPP.means <- read.csv('data/NPP.bird.means.csv')
-prelim.dataframe <- left_join(prelim.dataframe, NPP.bird.means, by = 'binomial')
-
-#NPP sd
-#NPP.sd <- read.csv('data/NPP.bird.sd.csv')
-prelim.dataframe <- left_join(prelim.dataframe, NPP.bird.sd, by = 'binomial')
-
-#Pop Density means
-#Pop.density.means <- read.csv('data/Pop.density.means.csv')
-prelim.dataframe <- left_join(prelim.dataframe, pop.density.means, by = 'binomial')
-
-#Pop density sd
-#Pop.density.sd <- read.csv('data/Pop.density.sd.csv')
-prelim.dataframe <- left_join(prelim.dataframe, pop.density.sd, by = 'binomial')
-
-write.csv(prelim.dataframe, 'data/complete.dataframe2.csv', row.names = F)
-```
-
-
-<!-- ##Obtaining an LGM anomaly for temperature and precipitation -->
-
-<!-- First for mean annual temperature BIO1 -->
-<!-- ```{r} -->
-<!-- #For LGM  -->
-<!-- LGM.BIO1 <- raster('data/LGMdata/cclgmbi1.tif') -->
-
-<!-- #Extract annual temp values from raster -->
-<!-- LGM.BIO1.values <- lapply(bird.points, function(x) {extract(LGM.BIO1, x)}) -->
-
-<!-- ``` -->
-
-
-<!-- And now annual mean temp for current climate -->
-<!-- ```{r} -->
-<!-- #Subset raster from stack -->
-<!-- BIO1.current <- bioclim_data@layers[[1]] -->
-
-<!-- #Extract annual temp values from raster -->
-<!-- BIO1.values.current <- lapply(bird.points, function(x) {extract(BIO1.current, x)}) -->
-<!-- ``` -->
-
-
-<!-- ```{r} -->
-<!-- BIO1.df <- as.data.frame(BIO1.values.current) -->
-<!-- BIO1.combined <- c(BIO1.values.current, LGM.BIO1.values) -->
-<!-- diff <- mapply(function(X,Y) { -->
-<!--   t.test(X, Y) -->
-<!--   }, X=BIO1.values.current, Y=LGM.BIO1.values) -->
-
-<!-- ``` -->
 
 ##R Session Info
 
